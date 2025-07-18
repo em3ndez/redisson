@@ -96,9 +96,9 @@ public class RedissonPermitExpirableSemaphore extends RedissonExpirable implemen
                 }
                 
                 if (nearestTimeout != null) {
-                    entry.getLatch().tryAcquire(permits, nearestTimeout, TimeUnit.MILLISECONDS);
+                    entry.getLatch().tryAcquire(nearestTimeout, TimeUnit.MILLISECONDS);
                 } else {
-                    entry.getLatch().acquire(permits);
+                    entry.getLatch().acquire();
                 }
             }
         } finally {
@@ -279,7 +279,7 @@ public class RedissonPermitExpirableSemaphore extends RedissonExpirable implemen
                 return CompletableFuture.completedFuture(ids);
             }
 
-            if (entry.getLatch().tryAcquire(permits)) {
+            if (entry.getLatch().tryAcquire()) {
                 return acquireAsync(permits, entry, leaseTime, timeUnit);
             }
 
@@ -502,9 +502,9 @@ public class RedissonPermitExpirableSemaphore extends RedissonExpirable implemen
                 current = System.currentTimeMillis();
 
                 if (nearestTimeout != null) {
-                    entry.getLatch().tryAcquire(permits, Math.min(time, nearestTimeout), TimeUnit.MILLISECONDS);
+                    entry.getLatch().tryAcquire(Math.min(time, nearestTimeout), TimeUnit.MILLISECONDS);
                 } else {
-                    entry.getLatch().tryAcquire(permits, time, TimeUnit.MILLISECONDS);
+                    entry.getLatch().tryAcquire(time, TimeUnit.MILLISECONDS);
                 }
                 
                 long elapsed = System.currentTimeMillis() - current;
