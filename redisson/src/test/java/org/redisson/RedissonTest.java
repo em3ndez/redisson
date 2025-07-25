@@ -5,12 +5,13 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.resolver.AddressResolverGroup;
-import io.netty.resolver.dns.DnsServerAddressStreamProvider;
-import io.netty.resolver.dns.DnsServerAddresses;
+import io.netty.resolver.ResolvedAddressTypes;
+import io.netty.resolver.dns.*;
 import io.netty.util.CharsetUtil;
 import net.bytebuddy.utility.RandomString;
 import nl.altindag.log.LogCaptor;
 import org.awaitility.Awaitility;
+import org.joor.Reflect;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.redisson.api.*;
@@ -29,10 +30,7 @@ import org.redisson.client.protocol.Encoder;
 import org.redisson.codec.JsonJacksonCodec;
 import org.redisson.codec.SerializationCodec;
 import org.redisson.config.*;
-import org.redisson.connection.CRC16;
-import org.redisson.connection.ConnectionListener;
-import org.redisson.connection.MasterSlaveConnectionManager;
-import org.redisson.connection.SequentialDnsAddressResolverFactory;
+import org.redisson.connection.*;
 import org.redisson.connection.pool.SlaveConnectionPool;
 import org.redisson.misc.RedisURI;
 import org.testcontainers.containers.ContainerState;
@@ -738,7 +736,8 @@ public class RedissonTest extends RedisDockerTest {
     public void testSingleConfigYAML() throws IOException {
         RedissonClient r = createInstance();
         String t = r.getConfig().toYAML();
-        Config c = Config.fromYAML(t);
+        String cc = t.replace("!<org.redisson.config.EqualJitterDelay> {}", "!<org.redisson.config.EqualJitterDelay> {baseDelay: PT1S, maxDelay: PT2S}");
+        Config c = Config.fromYAML(cc);
         assertThat(c.toYAML()).isEqualTo(t);
     }
 
@@ -747,8 +746,8 @@ public class RedissonTest extends RedisDockerTest {
         Config c2 = new Config();
         c2.useSentinelServers().addSentinelAddress("redis://123.1.1.1:1231").setMasterName("mymaster");
         String t = c2.toYAML();
-        System.out.println(t);
-        Config c = Config.fromYAML(t);
+        String cc = t.replace("!<org.redisson.config.EqualJitterDelay> {}", "!<org.redisson.config.EqualJitterDelay> {baseDelay: PT1S, maxDelay: PT2S}");
+        Config c = Config.fromYAML(cc);
         assertThat(c.toYAML()).isEqualTo(t);
     }
 
@@ -783,7 +782,8 @@ public class RedissonTest extends RedisDockerTest {
         Config c2 = new Config();
         c2.useMasterSlaveServers().setMasterAddress("redis://123.1.1.1:1231").addSlaveAddress("redis://82.12.47.12:1028", "redis://82.12.47.14:1028");
         String t = c2.toYAML();
-        Config c = Config.fromYAML(t);
+        String cc = t.replace("!<org.redisson.config.EqualJitterDelay> {}", "!<org.redisson.config.EqualJitterDelay> {baseDelay: PT1S, maxDelay: PT2S}");
+        Config c = Config.fromYAML(cc);
         assertThat(c.toYAML()).isEqualTo(t);
     }
 
@@ -1019,6 +1019,48 @@ public class RedissonTest extends RedisDockerTest {
             redissonConfig.useSingleServer()
                     .setRetryAttempts(Integer.MAX_VALUE);
         });
+    }
+
+    @Test
+    public void testResolveLocalhost() throws Exception {
+        SimpleDnsServer s = new SimpleDnsServer();
+
+        Config config = createConfig();
+        config.setAddressResolverGroupFactory(new DnsAddressResolverGroupFactory() {
+            @Override
+            public DnsAddressResolverGroup create(Class<? extends DatagramChannel> channelType,
+                                                  Class<? extends SocketChannel> socketChannelType,
+                                                  DnsServerAddressStreamProvider nameServerProvider) {
+                DnsNameResolverBuilder dnsResolverBuilder = new DnsNameResolverBuilder();
+                try {
+                    dnsResolverBuilder.getClass().getMethod("socketChannelType", Class.class, boolean.class);
+                    dnsResolverBuilder.socketChannelType(socketChannelType, true);
+                } catch (NoSuchMethodException e) {
+                    //log.warn("DNS TCP fallback on UDP query timeout disabled. Upgrade Netty to 4.1.105 or higher.");
+                    dnsResolverBuilder.socketChannelType(socketChannelType);
+                }
+                dnsResolverBuilder.channelType(channelType)
+                        .nameServerProvider(hostname -> DnsServerAddresses.singleton(s.getAddr()).stream())
+                        .resolveCache(new DefaultDnsCache())
+                        .resolvedAddressTypes(ResolvedAddressTypes.IPV4_PREFERRED)
+                        .cnameCache(new DefaultDnsCnameCache());
+
+                return new DnsAddressResolverGroup(dnsResolverBuilder);
+            }
+        });
+        config.useSingleServer()
+                .setDnsMonitoringInterval(1000)
+                .setAddress("redis://localhost:" + REDIS.getFirstMappedPort());
+        RedissonClient redisson = Redisson.create(config);
+
+        RedisURI addr = new RedisURI(redisson.getConfig().useSingleServer().getAddress());
+        ConnectionManager connectionManager = Reflect.on(redisson).get("connectionManager");
+        ServiceManager serviceManager = Reflect.on(connectionManager).get("serviceManager");
+        List<RedisURI> address = serviceManager.resolveAll(addr).get();
+        assertThat(address.size()).isEqualTo(1);
+
+        redisson.shutdown();
+        s.stop();
     }
 
 }

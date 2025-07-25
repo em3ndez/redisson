@@ -21,6 +21,7 @@ import org.redisson.api.NodeType;
 import org.redisson.api.RFuture;
 import org.redisson.client.*;
 import org.redisson.client.codec.StringCodec;
+import org.redisson.client.protocol.RedisCommands;
 import org.redisson.client.protocol.RedisStrictCommand;
 import org.redisson.client.protocol.decoder.ClusterNodesDecoder;
 import org.redisson.client.protocol.decoder.ObjectDecoder;
@@ -605,8 +606,13 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
         }
 
         Set<RedisURI> addedSlaves = newPart.getSlaveAddresses().stream()
-                                                                .filter(uri -> !currentPart.getSlaveAddresses().contains(uri)
-                                                                                && !newPart.getFailedSlaveAddresses().contains(uri))
+                                                                .filter(uri -> (!currentPart.getSlaveAddresses().contains(uri)
+                                                                                            && !newPart.getFailedSlaveAddresses().contains(uri))
+                                                                                    || (currentPart.getSlaveAddresses().contains(uri)
+                                                                                            && currentPart.getFailedSlaveAddresses().contains(uri)
+                                                                                            && !newPart.getFailedSlaveAddresses().contains(uri)
+                                                                                            && !entry.hasSlave(uri))
+                                                                )
                                                                 .collect(Collectors.toSet());
 
         if (!addedSlaves.isEmpty()) {
@@ -623,6 +629,7 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
                 slaveUpFuture = slaveUpFuture.thenApply(v -> {
                     if (v) {
                         currentPart.addSlaveAddress(uri);
+                        currentPart.removeFailedSlaveAddress(uri);
                         log.info("slave: {} unfreezed for master {} and slot ranges: {}",
                                 currentPart.getMasterAddress(), uri, currentPart.getSlotRanges());
                         entry.excludeMasterFromSlaves(uri);
@@ -640,6 +647,7 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
             CompletableFuture<Void> slaveUpFuture = entry.addSlave(uri, configEndpointHostName);
             CompletableFuture<Void> f = slaveUpFuture.thenAccept(res -> {
                 currentPart.addSlaveAddress(uri);
+                currentPart.removeFailedSlaveAddress(uri);
                 log.info("slave: {} added for master {} and slot ranges: {}",
                         currentPart.getMasterAddress(), uri, currentPart.getSlotRanges());
                 entry.excludeMasterFromSlaves(uri);
@@ -908,7 +916,7 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
             }
 
             CompletableFuture<List<RedisURI>> ipsFuture = serviceManager.resolveAll(clusterNodeInfo.getAddress());
-            CompletableFuture<Void> f = ipsFuture.thenAccept(addresses -> {
+            CompletableFuture<Void> f = ipsFuture.thenCompose(addresses -> {
                 int index = 0;
                 if (addresses.size() > 1) {
                     addresses.sort(Comparator.comparing(RedisURI::getHost));
@@ -947,6 +955,31 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
                     if (clusterNodeInfo.containsFlag(Flag.FAIL)) {
                         masterPartition.addFailedSlaveAddress(address);
                     }
+
+                    if (cfg.isCheckMasterLinkStatus()) {
+                        CompletionStage<RedisConnection> connectionFuture = connectToNode(cfg, address, configEndpointHostName);
+                        RedisURI finalAddress = address;
+                        return connectionFuture.thenCompose(con -> {
+                            RFuture<Map<String, String>> future = con.async(StringCodec.INSTANCE, RedisCommands.INFO_REPLICATION);
+                            return future.handle((info, ex) -> {
+                                if (ex != null) {
+                                    if (ex instanceof RedisTimeoutException) {
+                                        return null;
+                                    }
+
+                                    throw new CompletionException(ex);
+                                }
+
+                                String masterLinkStatus = info.getOrDefault("master_link_status", "");
+                                if ("down".equals(masterLinkStatus)) {
+                                    masterPartition.addFailedSlaveAddress(finalAddress);
+                                }
+                                return null;
+                            });
+                        });
+                    }
+                    return CompletableFuture.<Void>completedFuture(null);
+
                 } else if (clusterNodeInfo.containsFlag(Flag.MASTER)) {
                     ClusterPartition masterPartition = partitions.computeIfAbsent(masterId, k -> new ClusterPartition(masterId));
                     masterPartition.setSlotRanges(clusterNodeInfo.getSlotRanges());
@@ -956,6 +989,10 @@ public class ClusterConnectionManager extends MasterSlaveConnectionManager {
                         masterPartition.setMasterFail(true);
                     }
                 }
+
+                return CompletableFuture.<Void>completedFuture(null);
+
+
             }).exceptionally(ex -> {
                 if (clusterNodeInfo.containsFlag(Flag.FAIL)
                         || clusterNodeInfo.containsFlag(Flag.EVENTUAL_FAIL)) {

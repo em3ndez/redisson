@@ -283,8 +283,10 @@ public final class ServiceManager {
     private void initTimer() {
         Duration testdelay = config.getRetryDelay().calcDelay(0);
         int minTimeout = Math.min((int) testdelay.toMillis(), config.getTimeout());
-        if (minTimeout % 100 != 0) {
-            minTimeout = (minTimeout % 100) / 2;
+        if (minTimeout <= 0) {
+            minTimeout = 10;
+        } else if (minTimeout % 100 != 0) {
+            minTimeout = Math.max(10, (minTimeout % 100) / 2);
         } else if (minTimeout == 100) {
             minTimeout = 50;
         } else {
@@ -353,6 +355,15 @@ public final class ServiceManager {
             List<RedisURI> nodes = future.getNow().stream().map(addr -> {
                 return toURI(uri.getScheme(), addr.getAddress().getHostAddress(), "" + addr.getPort());
             }).collect(Collectors.toList());
+
+            long loopbackCount = future.getNow().stream()
+                    .filter(addr -> addr.getAddress().isLoopbackAddress())
+                    .count();
+            if (loopbackCount > 1) {
+                nodes.sort(Comparator.comparing(RedisURI::getHost));
+                nodes = nodes.subList(0, 1);
+            }
+
             result.complete(nodes);
         });
         return result;
